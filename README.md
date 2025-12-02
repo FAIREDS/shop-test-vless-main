@@ -110,7 +110,7 @@
 2) Выполните:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/tweopi/3xui-shopbot/main/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/FAIREDS/shop-test-vless-main/main/install.sh | sudo bash
 ```
 
 3) Следуйте инструкциям установщика:

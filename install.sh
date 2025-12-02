@@ -19,11 +19,11 @@ read_input_yn() {
     echo
 }
 
-REPO_URL="https://github.com/tweopi/3xui-shopbot.git"
-PROJECT_DIR="3xui-shopbot"
+REPO_URL="https://github.com/FAIREDS/shop-test-vless-main.git"
+PROJECT_DIR="shop-test-vless-main"
 NGINX_CONF_FILE="/etc/nginx/sites-available/${PROJECT_DIR}.conf"
 
-echo -e "${GREEN}--- Запуск скрипта установки/обновления 3xui-ShopBot ---${NC}"
+echo -e "${GREEN}--- Запуск скрипта установки/обновления shop-test-vless-main ---${NC}"
 
 if [ -f "$NGINX_CONF_FILE" ]; then
     echo -e "\n${CYAN}Обнаружена существующая конфигурация. Скрипт запущен в режиме обновления.${NC}"
