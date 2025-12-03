@@ -23,32 +23,19 @@ def get_key_info_text(key_number, expiry_date, created_date, connection_string):
     expiry_formatted = expiry_date.strftime('%d.%m.%Y в %H:%M')
     created_formatted = created_date.strftime('%d.%m.%Y в %H:%M')
     
-    # Если передан URL панели (начинается с http), отображаем кнопку
-    code_block = (
-        f"<b>🔗 Управление подпиской:</b>\n<a href='{connection_string}'>👉 Нажмите здесь, чтобы открыть панель</a>"
-        if connection_string.startswith("http")
-        else f"{html.code(connection_string)}"
-    )
-
     return (
         f"<b>🔑 Информация о ключе #{key_number}</b>\n\n"
         f"<b>➕ Приобретён:</b> {created_formatted}\n"
         f"<b>⏳ Действителен до:</b> {expiry_formatted}\n\n"
-        f"{code_block}"
+        f"{html.code(connection_string)}"
     )
 
 def get_purchase_success_text(action: str, key_number: int, expiry_date, connection_string: str):
     action_text = "обновлен" if action == "extend" else "готов"
     expiry_formatted = expiry_date.strftime('%d.%m.%Y в %H:%M')
 
-    code_block = (
-        f"<b>🔗 Управление подпиской:</b>\n<a href='{connection_string}'>👉 Нажмите здесь, чтобы открыть панель</a>"
-        if connection_string.startswith("http")
-        else f"{html.code(connection_string)}"
-    )
-
     return (
         f"🎉 <b>Ваш ключ #{key_number} {action_text}!</b>\n\n"
         f"⏳ <b>Он будет действовать до:</b> {expiry_formatted}\n\n"
-        f"{code_block}"
+        f"{html.code(connection_string)}"
     )
