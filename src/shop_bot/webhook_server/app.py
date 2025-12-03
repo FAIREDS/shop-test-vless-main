@@ -2119,6 +2119,79 @@ def create_webhook_app(bot_controller_instance):
             logger.error(f"YooMoney webhook ошибка: {e}", exc_info=True)
             return 'Error', 500
 
+    @flask_app.route('/sub/<token>')
+    def user_subscription_page(token):
+        from shop_bot.data_manager.database import get_user_by_sub_token, get_user_keys, get_setting
+        from shop_bot.modules import xui_api
+        
+        user = get_user_by_sub_token(token)
+        if not user:
+            return "Подписка не найдена", 404
+        
+        user_id = user['telegram_id']
+        keys = get_user_keys(user_id)
+        
+        links = []
+        # Using a thread pool or asyncio.gather would be better, but for simplicity in Flask:
+        # We iterate. This might be slow.
+        # Optimization: If we have many users, this needs refactoring to cache strings.
+        for key in keys:
+            try:
+                 # Warning: This performs a login for each key. 
+                 details = asyncio.run(xui_api.get_key_details_from_host(key))
+                 if details and details.get('connection_string'):
+                     cs = details['connection_string']
+                     # Ensure remark matches host name if possible
+                     if '#' not in cs:
+                         cs += f"#{key['host_name']}"
+                     links.append(cs)
+            except Exception as e:
+                 logger.error(f"Error fetching key details for {key.get('host_name')}: {e}")
+        
+        domain_val = (get_setting("domain") or request.host_url).rstrip('/')
+        if not domain_val.startswith('http'):
+            domain_val = f"https://{domain_val}"
+            
+        # Use the external domain for the subscription URL
+        subscription_url = f"{domain_val}/api/sub/{token}"
+        
+        return render_template(
+            'subscription.html',
+            brand_title=get_setting('panel_brand_title') or 'VPN Service',
+            bot_username=get_setting('telegram_bot_username') or '',
+            subscription_url=subscription_url,
+            links_json=json.dumps(links)
+        )
+
+    @flask_app.route('/api/sub/<token>')
+    def user_subscription_api(token):
+        """Returns VLESS links in base64 format (standard V2Ray subscription)."""
+        from shop_bot.data_manager.database import get_user_by_sub_token, get_user_keys
+        from shop_bot.modules import xui_api
+        
+        user = get_user_by_sub_token(token)
+        if not user:
+             return "Not Found", 404
+             
+        user_id = user['telegram_id']
+        keys = get_user_keys(user_id)
+        
+        lines = []
+        for key in keys:
+            try:
+                 details = asyncio.run(xui_api.get_key_details_from_host(key))
+                 if details and details.get('connection_string'):
+                     cs = details['connection_string']
+                     if '#' not in cs:
+                         cs += f"#{key['host_name']}"
+                     lines.append(cs)
+            except Exception:
+                pass
+        
+        content = "\n".join(lines)
+        b64_content = base64.b64encode(content.encode('utf-8')).decode('utf-8')
+        return b64_content, 200, {'Content-Type': 'text/plain; charset=utf-8'}
+
     return flask_app
 
 

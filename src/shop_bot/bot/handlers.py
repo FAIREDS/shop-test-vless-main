@@ -55,6 +55,7 @@ from shop_bot.data_manager.database import (
     redeem_promo_code,
     update_promo_code_status,
     get_admin_ids,
+    ensure_user_sub_token,
 )
 from shop_bot.config import (
     CHOOSE_PLAN_MESSAGE,
@@ -1183,7 +1184,15 @@ def get_user_router() -> Router:
             )
             
             new_expiry_date = datetime.fromtimestamp(result['expiry_timestamp_ms'] / 1000)
-            final_text = get_purchase_success_text("готов", get_next_key_number(user_id) -1, new_expiry_date, result['connection_string'])
+            
+            sub_token = ensure_user_sub_token(user_id)
+            dom = (get_setting("domain") or "").strip().rstrip('/')
+            if dom and not dom.startswith('http'):
+                dom = f"https://{dom}"
+            # Если домен не настроен, используем что есть, но ссылка будет нерабочей
+            sub_url = f"{dom}/sub/{sub_token}" if dom else result['connection_string']
+
+            final_text = get_purchase_success_text("готов", get_next_key_number(user_id) -1, new_expiry_date, sub_url)
             # Вместо удаления сообщения (что может быть запрещено Telegram), сначала пытаемся отредактировать его
             try:
                 await message.edit_text(text=final_text, reply_markup=keyboards.create_key_info_keyboard(new_key_id), disable_web_page_preview=True)
@@ -1224,7 +1233,13 @@ def get_user_router() -> Router:
             all_user_keys = get_user_keys(user_id)
             key_number = next((i + 1 for i, key in enumerate(all_user_keys) if key['key_id'] == key_id_to_show), 0)
             
-            final_text = get_key_info_text(key_number, expiry_date, created_date, connection_string)
+            sub_token = ensure_user_sub_token(user_id)
+            dom = (get_setting("domain") or "").strip().rstrip('/')
+            if dom and not dom.startswith('http'):
+                dom = f"https://{dom}"
+            sub_url = f"{dom}/sub/{sub_token}" if dom else connection_string
+            
+            final_text = get_key_info_text(key_number, expiry_date, created_date, sub_url)
             
             await callback.message.edit_text(
                 text=final_text,
@@ -3096,11 +3111,17 @@ async def process_successful_payment(bot: Bot, metadata: dict):
         all_user_keys = get_user_keys(user_id)
         key_number = next((i + 1 for i, key in enumerate(all_user_keys) if key['key_id'] == key_id), len(all_user_keys))
 
+        sub_token = ensure_user_sub_token(user_id)
+        dom = (get_setting("domain") or "").strip().rstrip('/')
+        if dom and not dom.startswith('http'):
+            dom = f"https://{dom}"
+        sub_url = f"{dom}/sub/{sub_token}" if dom else (connection_string or "")
+
         final_text = get_purchase_success_text(
             action="создан" if action == "new" else "продлен",
             key_number=key_number,
             expiry_date=new_expiry_date or datetime.now(),
-            connection_string=connection_string or ""
+            connection_string=sub_url
         )
         
         await bot.send_message(

@@ -320,6 +320,10 @@ def initialize_db():
             
             # Миграция: добавить колонку created_date в vpn_keys если её нет
             try:
+                cursor.execute("ALTER TABLE users ADD COLUMN sub_token TEXT UNIQUE")
+            except sqlite3.OperationalError:
+                pass  # Колонка уже существует
+            try:
                 cursor.execute("PRAGMA table_info(vpn_keys)")
                 columns = [row[1] for row in cursor.fetchall()]
                 if 'created_date' not in columns:
@@ -2988,7 +2992,6 @@ def get_latest_resource_metric(scope: str, object_name: str) -> dict | None:
         logging.error("Не удалось get latest resource metric for %s/%s: %s", scope, object_name, e)
         return None
 
-
 def get_metrics_series(scope: str, object_name: str, *, since_hours: int = 24, limit: int = 500) -> list[dict]:
     """Get a series of resource metrics for a scope/object."""
     try:
@@ -3027,3 +3030,40 @@ def get_metrics_series(scope: str, object_name: str, *, since_hours: int = 24, l
     except sqlite3.Error as e:
         logging.error("Не удалось get metrics series for %s/%s: %s", scope, object_name, e)
         return []
+def get_user_by_sub_token(token: str) -> dict | None:
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE sub_token = ?", (token,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    except sqlite3.Error as e:
+        logging.error(f"get_user_by_sub_token error: {e}")
+        return None
+
+def ensure_user_sub_token(user_id: int) -> str | None:
+    """Ensures the user has a unique subscription token. Generates one if missing."""
+    try:
+        import secrets
+        # Check if token exists
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT sub_token FROM users WHERE telegram_id = ?", (user_id,))
+            row = cursor.fetchone()
+            if row and row[0]:
+                return row[0]
+
+            # Generate new token - retry loop in case of collision (highly unlikely but safe)
+            for _ in range(3):
+                new_token = secrets.token_urlsafe(16)
+                try:
+                    cursor.execute("UPDATE users SET sub_token = ? WHERE telegram_id = ?", (new_token, user_id))
+                    conn.commit()
+                    return new_token
+                except sqlite3.IntegrityError:
+                    continue
+            return None
+    except sqlite3.Error as e:
+        logging.error(f"ensure_user_sub_token error for {user_id}: {e}")
+        return None
