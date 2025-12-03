@@ -1179,8 +1179,7 @@ def get_user_router() -> Router:
                 host_name=host_name,
                 xui_client_uuid=result['client_uuid'],
                 key_email=result['email'],
-                expiry_timestamp_ms=result['expiry_timestamp_ms'],
-                subscription_token=result.get('subscription_token')
+                expiry_timestamp_ms=result['expiry_timestamp_ms']
             )
             
             new_expiry_date = datetime.fromtimestamp(result['expiry_timestamp_ms'] / 1000)
@@ -1321,8 +1320,7 @@ def get_user_router() -> Router:
                 key_id=key_id,
                 new_host_name=new_host_name,
                 new_xui_uuid=result['client_uuid'],
-                new_expiry_ms=result['expiry_timestamp_ms'],
-                new_subscription_token=result.get('subscription_token')
+                new_expiry_ms=result['expiry_timestamp_ms']
             )
 
             try:
@@ -2891,11 +2889,10 @@ async def process_successful_payment(bot: Bot, metadata: dict):
                 host_name=host_name,
                 xui_client_uuid=result['client_uuid'],
                 key_email=result['email'],
-                expiry_timestamp_ms=result['expiry_timestamp_ms'],
-                subscription_token=result.get('subscription_token')
+                expiry_timestamp_ms=result['expiry_timestamp_ms']
             )
         elif action == "extend":
-            update_key_info(key_id, result['client_uuid'], result['expiry_timestamp_ms'], subscription_token=result.get('subscription_token'))
+            update_key_info(key_id, result['client_uuid'], result['expiry_timestamp_ms'])
 
         # Начисляем реферальное вознаграждение по покупке — применяется для new и extend
         user_data = get_user(user_id)

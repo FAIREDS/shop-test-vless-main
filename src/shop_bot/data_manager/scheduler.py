@@ -232,25 +232,12 @@ async def sync_keys_with_panels():
                             )
                             continue
 
-                        sub_token = None
-                        for attr in ("subId", "subscription", "sub_id", "subscription_token"):
-                            try:
-                                val = getattr(orphan_client, attr, None)
-                            except Exception:
-                                val = None
-                            if not val and isinstance(orphan_client, dict):
-                                val = orphan_client.get(attr)
-                            if val:
-                                sub_token = str(val).strip()
-                                break
-
                         new_id = database.add_new_key(
                             user_id=user_id,
                             host_name=host_name,
                             xui_client_uuid=str(client_uuid),
                             key_email=orphan_email,
                             expiry_timestamp_ms=expiry_ms,
-                            subscription_token=sub_token
                         )
                         if new_id:
                             logger.info(

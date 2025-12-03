@@ -1546,12 +1546,7 @@ def get_admin_router() -> Router:
             return
         # Обновление в БД
         try:
-            update_key_info(
-                key_id,
-                resp['client_uuid'],
-                int(resp['expiry_timestamp_ms']),
-                subscription_token=resp.get('subscription_token')
-            )
+            update_key_info(key_id, resp['client_uuid'], int(resp['expiry_timestamp_ms']))
         except Exception as e:
             logger.error(f"Admin key extend: DB update failed for key #{key_id}: {e}")
         await state.clear()
@@ -2086,14 +2081,7 @@ def get_admin_router() -> Router:
         expiry_ms = int(host_resp["expiry_timestamp_ms"])  # в мс
         connection_link = host_resp.get("connection_string")
 
-        key_id = add_new_key(
-            user_id,
-            host_name,
-            client_uuid,
-            generated_email,
-            expiry_ms,
-            subscription_token=host_resp.get('subscription_token')
-        )
+        key_id = add_new_key(user_id, host_name, client_uuid, generated_email, expiry_ms)
         if key_id:
             username_readable = (user.get('username') or '').strip()
             user_part = f"{user_id} (@{username_readable})" if username_readable else f"{user_id}"
@@ -2558,12 +2546,7 @@ def get_admin_router() -> Router:
             return
         # Обновим в БД
         try:
-            update_key_info(
-                key_id,
-                resp['client_uuid'],
-                int(resp['expiry_timestamp_ms']),
-                subscription_token=resp.get('subscription_token')
-            )
+            update_key_info(key_id, resp['client_uuid'], int(resp['expiry_timestamp_ms']))
         except Exception as e:
             logger.error(f"Extend flow: failed update DB for key #{key_id}: {e}")
         await state.clear()
