@@ -21,6 +21,25 @@ def normalize_host_name(name: str | None) -> str:
         s = s.replace(ch, "")
     return s
 
+def _extract_subscription_token_from_client(client) -> str | None:
+    """Пытается вытащить token подписки из объекта клиента панели."""
+    if not client:
+        return None
+    candidate_fields = ("subscription_token", "subscriptionToken", "subId", "subscription", "sub_id")
+    for attr in candidate_fields:
+        try:
+            if hasattr(client, attr):
+                value = getattr(client, attr)
+            elif isinstance(client, dict):
+                value = client.get(attr)
+            else:
+                value = None
+            if value:
+                return str(value).strip()
+        except Exception:
+            continue
+    return None
+
 # === Кеширование настроек для производительности ===
 _settings_cache: dict[str, tuple[str | None, float]] = {}  # {key: (value, timestamp)}
 _SETTINGS_CACHE_TTL = 300  # 5 минут
@@ -72,13 +91,15 @@ def initialize_db():
                     expiry_date TIMESTAMP,
                     created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     comment TEXT,
-                    is_gift BOOLEAN DEFAULT 0
+                    is_gift BOOLEAN DEFAULT 0,
+                    subscription_token TEXT
                 )
             ''')
             # Добавляем критические индексы для vpn_keys
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_vpn_keys_user_id ON vpn_keys(user_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_vpn_keys_email ON vpn_keys(key_email)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_vpn_keys_host ON vpn_keys(host_name)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_vpn_keys_subscription_token ON vpn_keys(subscription_token)")
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS promo_codes (
                     promo_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -856,6 +877,10 @@ def run_migration():
             if 'is_gift' not in vk_cols:
                 cursor.execute("ALTER TABLE vpn_keys ADD COLUMN is_gift BOOLEAN DEFAULT 0")
                 logging.info(" -> Добавлен столбец 'is_gift' в 'vpn_keys'.")
+            if 'subscription_token' not in vk_cols:
+                cursor.execute("ALTER TABLE vpn_keys ADD COLUMN subscription_token TEXT")
+                logging.info(" -> Добавлен столбец 'subscription_token' в 'vpn_keys'.")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_vpn_keys_subscription_token ON vpn_keys(subscription_token)")
             conn.commit()
         except sqlite3.Error as e:
             logging.error(f"Не удалось мигрировать 'vpn_keys': {e}")
@@ -2017,14 +2042,21 @@ def set_trial_used(telegram_id: int):
     except sqlite3.Error as e:
         logging.error(f"Не удалось отметить пробный период как использованный для пользователя {telegram_id}: {e}")
 
-def add_new_key(user_id: int, host_name: str, xui_client_uuid: str, key_email: str, expiry_timestamp_ms: int):
+def add_new_key(
+    user_id: int,
+    host_name: str,
+    xui_client_uuid: str,
+    key_email: str,
+    expiry_timestamp_ms: int,
+    subscription_token: str | None = None
+):
     try:
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
             expiry_date = datetime.fromtimestamp(expiry_timestamp_ms / 1000)
             cursor.execute(
-                "INSERT INTO vpn_keys (user_id, host_name, xui_client_uuid, key_email, expiry_date) VALUES (?, ?, ?, ?, ?)",
-                (user_id, host_name, xui_client_uuid, key_email, expiry_date)
+                "INSERT INTO vpn_keys (user_id, host_name, xui_client_uuid, key_email, expiry_date, subscription_token) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, host_name, xui_client_uuid, key_email, expiry_date, (subscription_token or None))
             )
             new_key_id = cursor.lastrowid
             conn.commit()
@@ -2082,26 +2114,82 @@ def get_key_by_email(key_email: str):
         logging.error(f"Не удалось get key by email {key_email}: {e}")
         return None
 
-def update_key_info(key_id: int, new_xui_uuid: str, new_expiry_ms: int):
+def get_key_by_subscription_token(subscription_token: str):
+    token = (subscription_token or "").strip()
+    if not token:
+        return None
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM vpn_keys WHERE subscription_token = ?", (token,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    except sqlite3.Error as e:
+        logging.error(f"Не удалось получить ключ по subscription_token: {e}")
+        return None
+
+def get_key_by_uuid(xui_client_uuid: str):
+    uuid_value = (xui_client_uuid or "").strip()
+    if not uuid_value:
+        return None
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM vpn_keys WHERE xui_client_uuid = ?", (uuid_value,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    except sqlite3.Error as e:
+        logging.error(f"Не удалось получить ключ по UUID '{xui_client_uuid}': {e}")
+        return None
+
+def update_key_subscription_token(key_id: int, subscription_token: str | None) -> bool:
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE vpn_keys SET subscription_token = ? WHERE key_id = ?",
+                ((subscription_token or None), key_id)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+    except sqlite3.Error as e:
+        logging.error(f"Не удалось обновить subscription_token для ключа {key_id}: {e}")
+        return False
+
+def update_key_info(key_id: int, new_xui_uuid: str, new_expiry_ms: int, subscription_token: str | None = None):
     try:
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
             expiry_date = datetime.fromtimestamp(new_expiry_ms / 1000)
-            cursor.execute("UPDATE vpn_keys SET xui_client_uuid = ?, expiry_date = ? WHERE key_id = ?", (new_xui_uuid, expiry_date, key_id))
+            fields = ["xui_client_uuid = ?", "expiry_date = ?"]
+            values: list = [new_xui_uuid, expiry_date]
+            if subscription_token is not None:
+                fields.append("subscription_token = ?")
+                values.append(subscription_token or None)
+            values.append(key_id)
+            cursor.execute(f"UPDATE vpn_keys SET {', '.join(fields)} WHERE key_id = ?", values)
             conn.commit()
     except sqlite3.Error as e:
         logging.error(f"Не удалось update key {key_id}: {e}")
  
-def update_key_host_and_info(key_id: int, new_host_name: str, new_xui_uuid: str, new_expiry_ms: int):
+def update_key_host_and_info(key_id: int, new_host_name: str, new_xui_uuid: str, new_expiry_ms: int, new_subscription_token: str | None = None):
     """Update key's host, UUID and expiry in a single transaction."""
     try:
         new_host_name = normalize_host_name(new_host_name)
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
             expiry_date = datetime.fromtimestamp(new_expiry_ms / 1000)
+            fields = ["host_name = ?", "xui_client_uuid = ?", "expiry_date = ?"]
+            values: list = [new_host_name, new_xui_uuid, expiry_date]
+            if new_subscription_token is not None:
+                fields.append("subscription_token = ?")
+                values.append(new_subscription_token or None)
+            values.append(key_id)
             cursor.execute(
-                "UPDATE vpn_keys SET host_name = ?, xui_client_uuid = ?, expiry_date = ? WHERE key_id = ?",
-                (new_host_name, new_xui_uuid, expiry_date, key_id)
+                f"UPDATE vpn_keys SET {', '.join(fields)} WHERE key_id = ?",
+                values
             )
             conn.commit()
     except sqlite3.Error as e:
@@ -2142,7 +2230,14 @@ def update_key_status_from_server(key_email: str, xui_client_data):
             cursor = conn.cursor()
             if xui_client_data:
                 expiry_date = datetime.fromtimestamp(xui_client_data.expiry_time / 1000)
-                cursor.execute("UPDATE vpn_keys SET xui_client_uuid = ?, expiry_date = ? WHERE key_email = ?", (xui_client_data.id, expiry_date, key_email))
+                token = _extract_subscription_token_from_client(xui_client_data)
+                fields = ["xui_client_uuid = ?", "expiry_date = ?"]
+                values: list = [xui_client_data.id, expiry_date]
+                if token:
+                    fields.append("subscription_token = ?")
+                    values.append(token)
+                values.append(key_email)
+                cursor.execute(f"UPDATE vpn_keys SET {', '.join(fields)} WHERE key_email = ?", values)
             else:
                 cursor.execute("DELETE FROM vpn_keys WHERE key_email = ?", (key_email,))
             conn.commit()

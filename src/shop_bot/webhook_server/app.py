@@ -41,7 +41,8 @@ from shop_bot.data_manager.database import (
     update_host_url, update_host_name, update_host_ssh_settings, get_latest_speedtest, get_speedtests,
     get_all_keys, get_keys_for_user, get_key_by_id, delete_key_by_id, update_key_comment, update_key_info,
     add_new_key, get_balance, adjust_user_balance, get_referrals_for_user,
-    get_user, get_key_by_email, get_host)
+    get_user, get_key_by_email, get_host, get_key_by_subscription_token,
+    update_key_subscription_token, get_key_by_uuid)
 
 
 _bot_controller = None
@@ -183,6 +184,243 @@ def create_webhook_app(bot_controller_instance):
             "all_tickets_count": all_tickets_count,
             "brand_title": settings.get('panel_brand_title') or 'T‑Shift VPN',
         }
+
+    SUBSCRIPTION_HERO_IMAGE = "https://images.unsplash.com/photo-1504384308090-c894fdcc538d?auto=format&fit=crop&w=1600&q=80"
+
+    def _parse_datetime_safe(value: str | None):
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value))
+        except Exception:
+            try:
+                return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except Exception:
+                return None
+
+    def _extract_client_token(client) -> str | None:
+        if not client:
+            return None
+        candidate_fields = ("subscription_token", "subscriptionToken", "subId", "subscription", "sub_id")
+        for attr in candidate_fields:
+            try:
+                if hasattr(client, attr):
+                    val = getattr(client, attr)
+                elif isinstance(client, dict):
+                    val = client.get(attr)
+                else:
+                    val = None
+            except Exception:
+                val = None
+            if val:
+                txt = str(val).strip()
+                if txt:
+                    return txt
+        return None
+
+    def _probe_hosts_for_token(subscription_token: str):
+        token = (subscription_token or "").strip()
+        if not token:
+            return None
+        hosts = get_all_hosts()
+        for host in hosts:
+            host_name = host.get('host_name')
+            try:
+                api, inbound = xui_api.login_to_host(
+                    host_url=host['host_url'],
+                    username=host['host_username'],
+                    password=host['host_pass'],
+                    inbound_id=host['host_inbound_id']
+                )
+                if not api or not inbound:
+                    continue
+                try:
+                    full_inbound = api.inbound.get_by_id(inbound.id)
+                except Exception:
+                    full_inbound = inbound
+                clients = getattr(full_inbound.settings, "clients", None) or []
+                for client in clients:
+                    candidate = _extract_client_token(client)
+                    if candidate and candidate == token:
+                        email = getattr(client, "email", None) or getattr(client, "id", None)
+                        if not email:
+                            continue
+                        key = get_key_by_email(email)
+                        if key:
+                            key['subscription_token'] = token
+                            update_key_subscription_token(key['key_id'], token)
+                            return key
+            except Exception as e:
+                logger.warning(f"Subscription lookup: не удалось обработать хост '{host_name}': {e}")
+        return None
+
+    def _resolve_key_for_subscription(token: str):
+        normalized = (token or "").strip()
+        if not normalized:
+            return None, token
+        key = get_key_by_subscription_token(normalized)
+        if key:
+            return key, normalized
+        key = get_key_by_uuid(normalized)
+        if key:
+            return key, normalized
+        key = _probe_hosts_for_token(normalized)
+        if key:
+            canonical = key.get('subscription_token') or normalized
+            return key, canonical
+        return None, token
+
+    def _build_vless_entry_for_key(key_row: dict, inbound_cache: dict):
+        host_name = key_row.get('host_name')
+        if not host_name:
+            return None
+        host_meta = get_host(host_name)
+        if not host_meta:
+            return None
+        cache_entry = inbound_cache.get(host_name, None)
+        if cache_entry is None:
+            try:
+                api, inbound = xui_api.login_to_host(
+                    host_url=host_meta['host_url'],
+                    username=host_meta['host_username'],
+                    password=host_meta['host_pass'],
+                    inbound_id=host_meta['host_inbound_id']
+                )
+            except Exception as e:
+                logger.warning(f"Subscription: не удалось подключиться к хосту '{host_name}': {e}")
+                inbound_cache[host_name] = False
+                return None
+            if not api or not inbound:
+                inbound_cache[host_name] = False
+                return None
+            inbound_cache[host_name] = inbound
+            cache_entry = inbound
+        if cache_entry is False:
+            return None
+        remark = (key_row.get('comment') or host_name).strip()
+        try:
+            link = xui_api.get_connection_string(cache_entry, key_row['xui_client_uuid'], host_meta['host_url'], remark)
+        except Exception as e:
+            logger.warning(f"Subscription: не удалось построить ссылку для '{host_name}': {e}")
+            return None
+        if not link:
+            return None
+        expiry_dt = _parse_datetime_safe(key_row.get('expiry_date'))
+        created_dt = _parse_datetime_safe(key_row.get('created_date'))
+        now = datetime.utcnow()
+        hours_left = None
+        days_left = None
+        if expiry_dt:
+            delta = expiry_dt - now
+            hours_left = max(0, int(delta.total_seconds() // 3600))
+            days_left = max(0, int(delta.total_seconds() // 86400))
+        return {
+            "link": link,
+            "host": host_name,
+            "label": remark,
+            "expires_at": expiry_dt.isoformat() if expiry_dt else None,
+            "created_at": created_dt.isoformat() if created_dt else None,
+            "key_id": key_row.get('key_id'),
+            "days_left": days_left,
+            "hours_left": hours_left,
+            "subscription_token": key_row.get('subscription_token')
+        }
+
+    def _build_subscription_payload(token: str):
+        key_row, canonical_token = _resolve_key_for_subscription(token)
+        if not key_row:
+            return None
+        user = get_user(key_row['user_id']) or {}
+        user_keys = get_user_keys(key_row['user_id']) or []
+        inbound_cache: dict[str, object] = {}
+        now = datetime.utcnow()
+        links = []
+        for row in user_keys:
+            expiry_dt = _parse_datetime_safe(row.get('expiry_date'))
+            if expiry_dt and expiry_dt < now:
+                continue
+            entry = _build_vless_entry_for_key(row, inbound_cache)
+            if not entry:
+                continue
+            link_payload = {
+                "link": entry["link"],
+                "host": entry["host"],
+                "label": entry["label"],
+                "expiresAt": entry["expires_at"],
+                "createdAt": entry["created_at"],
+                "keyId": entry["key_id"],
+                "daysLeft": entry["days_left"],
+                "hoursLeft": entry["hours_left"]
+            }
+            links.append(link_payload)
+        links.sort(key=lambda x: (x["expiresAt"] or ""))
+        brand_title = get_setting('panel_brand_title') or 'T‑Shift VPN'
+        subscription_url = url_for('subscription_page', token=token, _external=True)
+        payload = {
+            "token": token,
+            "canonicalToken": canonical_token,
+            "brandTitle": brand_title,
+            "subscriptionUrl": subscription_url,
+            "subscriptionImportUrl": f"{subscription_url}?format=v2ray",
+            "links": links,
+            "heroImage": SUBSCRIPTION_HERO_IMAGE,
+            "status": "active" if links else "inactive",
+            "user": {
+                "telegramId": user.get('telegram_id'),
+                "username": user.get('username'),
+                "registeredAt": user.get('registration_date')
+            },
+            "meta": {
+                "serversTotal": len(links),
+                "lastUpdated": datetime.utcnow().isoformat(),
+                "support": get_setting('support_user')
+            }
+        }
+        if links:
+            payload["meta"]["nextExpiry"] = links[0].get("expiresAt")
+        return payload
+
+    @flask_app.route('/sub/<token>')
+    def subscription_page(token: str):
+        token = (token or "").strip()
+        format_type = (request.args.get('format') or '').strip().lower()
+        payload = _build_subscription_payload(token) if token else None
+        brand_title = get_setting('panel_brand_title') or 'T‑Shift VPN'
+        subscription_url = url_for('subscription_page', token=token, _external=True) if token else None
+        status_code = 200
+        if not payload:
+            payload = {
+                "token": token,
+                "brandTitle": brand_title,
+                "subscriptionUrl": subscription_url,
+                "subscriptionImportUrl": f"{subscription_url}?format=v2ray" if subscription_url else None,
+                "links": [],
+                "heroImage": SUBSCRIPTION_HERO_IMAGE,
+                "status": "inactive",
+                "error": "Подписка не найдена или срок действия истёк.",
+                "meta": {
+                    "serversTotal": 0,
+                    "lastUpdated": datetime.utcnow().isoformat(),
+                    "support": get_setting('support_user')
+                }
+            }
+            status_code = 404
+        raw_links = [link.get("link") for link in payload.get("links", []) if link.get("link")]
+        if format_type == 'json':
+            return jsonify({"ok": status_code == 200, "data": payload}), status_code
+        if format_type in ('v2ray', 'base64'):
+            if not raw_links:
+                return ("", 404)
+            body = "\n".join(raw_links)
+            encoded = base64.b64encode(body.encode('utf-8')).decode('utf-8')
+            return flask_app.response_class(encoded, mimetype='text/plain')
+        if format_type == 'raw':
+            if not raw_links:
+                return ("", 404)
+            body = "\n".join(raw_links)
+            return flask_app.response_class(body, mimetype='text/plain')
+        panel_json = json.dumps(payload, ensure_ascii=False)
+        return render_template('subscription_panel.html', panel_json=panel_json), status_code
 
     @flask_app.route('/brand-title', methods=['POST'])
     @login_required
@@ -553,7 +791,7 @@ def create_webhook_app(bot_controller_instance):
             pass
 
         # 2) Сохранить в БД
-        new_id = add_new_key(user_id, host_name, xui_uuid, key_email, expiry_ms or 0)
+        new_id = add_new_key(user_id, host_name, xui_uuid, key_email, expiry_ms or 0, subscription_token=result.get('subscription_token'))
         flash(('Ключ добавлен.' if new_id else 'Ошибка при добавлении ключа.'), 'success' if new_id else 'danger')
 
         # 3) Уведомление пользователю в Telegram (без email, с пометкой, что ключ выдан администратором)
@@ -606,7 +844,14 @@ def create_webhook_app(bot_controller_instance):
             return jsonify({"ok": False, "error": "host_failed"}), 500
 
         # sync DB
-        new_id = add_new_key(user_id, host_name, result.get('client_uuid') or xui_uuid, key_email, result.get('expiry_timestamp_ms') or expiry_ms or 0)
+        new_id = add_new_key(
+            user_id,
+            host_name,
+            result.get('client_uuid') or xui_uuid,
+            key_email,
+            result.get('expiry_timestamp_ms') or expiry_ms or 0,
+            subscription_token=result.get('subscription_token')
+        )
 
         # notify user (без email, с пометкой про администратора)
         try:
@@ -697,7 +942,14 @@ def create_webhook_app(bot_controller_instance):
             print("Ошибка: хост не вернул клиента")
             raise SystemExit(1)
 
-        new_id = add_new_key(user_id, host_name, result.get('client_uuid') or xui_uuid, key_email, result.get('expiry_timestamp_ms') or expiry_ms or 0)
+        new_id = add_new_key(
+            user_id,
+            host_name,
+            result.get('client_uuid') or xui_uuid,
+            key_email,
+            result.get('expiry_timestamp_ms') or expiry_ms or 0,
+            subscription_token=result.get('subscription_token')
+        )
         if comment and new_id:
             try:
                 update_key_comment(int(new_id), comment)
@@ -819,7 +1071,7 @@ def create_webhook_app(bot_controller_instance):
 
             # 2) Сохраняем в БД (обновляем UUID, если изменился, и дату истечения)
             client_uuid = result.get('client_uuid') or key.get('xui_client_uuid') or ''
-            update_key_info(key_id, client_uuid, int(result.get('expiry_timestamp_ms')))
+            update_key_info(key_id, client_uuid, int(result.get('expiry_timestamp_ms')), subscription_token=result.get('subscription_token'))
 
             # Уведомим пользователя о продлении/сокращении срока
             try:
